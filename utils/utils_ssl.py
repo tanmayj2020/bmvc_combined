@@ -11,6 +11,7 @@ import torch
 from torch import nn
 import torch.distributed as dist
 from PIL import ImageFilter, ImageOps
+from utils.mix import cutmix_data, mixup_data, mixup_criterion
 import argparse
 import warnings
 from einops import rearrange, repeat
@@ -51,7 +52,7 @@ class MultiCropWrapper(nn.Module):
         embed_dim = self.backbone.embed_dim
         self.linear_classifier = LinearClassifier(embed_dim, num_labels=args.num_classes)
 
-    def forward(self, x ,type="student" , mode="train" , target, = None , criterion = None):
+    def forward(self, x ,type="student" , mode="train" , target = None , criterion = None , args=None):
         
         if mode == "eval":
             output = self.backbone(x)
