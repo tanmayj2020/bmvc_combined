@@ -157,6 +157,16 @@ def get_args_parser():
     # Finetune arguments 
     parser.add_argument('--ls', action='store_false', help='label smoothing')
     parser.add_argument('--sd', default=0.1, type=float, help='rate of stochastic depth')
+    parser.add_argument('--aa', action='store_false', help='Auto augmentation used')
+    parser.add_argument('--re', default=0.25, type=float, help='Random Erasing probability')
+    parser.add_argument('--re_sh', default=0.4, type=float, help='max erasing area')
+    parser.add_argument('--re_r1', default=0.3, type=float, help='aspect of erasing area')
+    parser.add_argument('--cm',action='store_false' , help='Use Cutmix')
+    parser.add_argument('--mu',action='store_false' , help='Use Mixup')
+    parser.add_argument('--mix_prob', default=0.5, type=float, help='mixup probability')
+    parser.add_argument('--alpha', default=1.0, type=float,help='mixup interpolation coefficient (default: 1)')
+    parser.add_argument('--beta', default=1.0, type=float, help='hyperparameter beta (default: 1)')
+    
 
 
 
@@ -403,7 +413,7 @@ def train(args):
 
     if args.ls:
         print(Fore.YELLOW + '*'*80)
-        logger.debug('label smoothing used')
+        #logger.debug('label smoothing used')
         print('*'*80+Style.RESET_ALL)
         criterion = LabelSmoothingCrossEntropy()
     
@@ -412,7 +422,7 @@ def train(args):
     
     if args.sd > 0.:
         print(Fore.YELLOW + '*'*80)
-        logger.debug(f'Stochastic depth({args.sd}) used ')
+        #logger.debug(f'Stochastic depth({args.sd}) used ')
         print('*'*80+Style.RESET_ALL)   
 
 
@@ -479,7 +489,7 @@ def train_one_epoch(student, teacher, teacher_without_ddp, view_pred_loss, data_
         # teacher and student forward passes + compute loss
         with torch.cuda.amp.autocast(fp16_scaler is not None):
             teacher_output  = teacher(images[1:3] , "teacher")  # only the 2 global views pass through the teacher
-            student_output , classifier_loss  = student(images , "student" , "train" , target , criterion)
+            student_output , classifier_loss  = student(images , "student" , "train" , target , criterion , args)
             total_loss = view_pred_loss(student_output, teacher_output, epoch)
             loss_bmcv = total_loss.pop('loss')
             loss = args.lambda_weight * classifier_loss + (1-args.lambda_weight) * loss_bmcv
@@ -657,21 +667,20 @@ class DataAugmentation(object):
             ),
             transforms.RandomGrayscale(p=0.2),
         ])
-        normalize = transforms.Compose([
+        normalize_ = transforms.Compose([
             transforms.ToTensor(),
 	    transforms.Normalize(mean, std),
         ])
 
-        normalize = [transforms.Normalize(mean=data_info['stat'][0], std=data_info['stat'][1])]
+        normalize = [transforms.Normalize(mean=mean, std=std)]
         augmentations = []
         augmentations += [                
             transforms.RandomHorizontalFlip(),
-            transforms.RandomCrop(data_info['img_size'], padding=4)
+            transforms.RandomCrop(args.image_size, padding=4)
             ]
 
         if args.aa == True:
-        print(Fore.YELLOW+'*'*80)
-        logger.debug('Autoaugmentation used')      
+            print(Fore.YELLOW+'*'*80)
         
         if 'CIFAR' in args.dataset:
             print("CIFAR Policy")
@@ -698,17 +707,17 @@ class DataAugmentation(object):
         augmentations += [                
             transforms.ToTensor(),
             *normalize] 
-        if args.re > 0:
-        from utils.random_erasing import RandomErasing
-        print(Fore.YELLOW + '*'*80)
-        logger.debug(f'Random erasing({args.re}) used ')
-        print('*'*80+Style.RESET_ALL)    
         
-        augmentations += [     
-            RandomErasing(probability = args.re, sh = args.re_sh, r1 = args.re_r1, mean=data_info['stat'][0])
-            ]
+        if args.re > 0:
+            from utils.random_erasing import RandomErasing
+            print(Fore.YELLOW + '*'*80)
+            print('*'*80+Style.RESET_ALL)    
+        
+            augmentations += [     
+                RandomErasing(probability = args.re, sh = args.re_sh, r1 = args.re_r1, mean=mean)
+                ]
 
-        self.train_transform = transforms.Compose(augmentations)
+        self.train_t = transforms.Compose(augmentations)
 
 
         # first global crop
@@ -716,7 +725,7 @@ class DataAugmentation(object):
             transforms.RandomResizedCrop(args.image_size, scale=args.global_crops_scale, interpolation=Image.BICUBIC),
             flip_and_color_jitter,
             utils.GaussianBlur(1.0),
-            normalize,
+            normalize_,
         ])
         # second global crop
         self.global_transfo2 = transforms.Compose([
@@ -724,7 +733,7 @@ class DataAugmentation(object):
             flip_and_color_jitter,
             utils.GaussianBlur(0.1),
             utils.Solarization(0.2),
-            normalize,
+            normalize_,
         ])
         # transformation for the local small crops
         self.local_crops_number = args.local_crops_number
@@ -732,12 +741,14 @@ class DataAugmentation(object):
             transforms.RandomResizedCrop(args.image_size//2, scale=args.local_crops_scale, interpolation=Image.BICUBIC),
             flip_and_color_jitter,
             utils.GaussianBlur(p=0.5),
-            normalize,
+            normalize_,
         ])
 
     def __call__(self, image):
+        #print(type(self.global_transfo1))
         crops = []
-        crops.append(self.train_transform(image))
+
+        crops.append(self.train_t(image))
         crops.append(self.global_transfo1(image))
         crops.append(self.global_transfo2(image))
         for _ in range(self.local_crops_number):
